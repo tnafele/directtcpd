@@ -80,6 +80,34 @@ void cleanup_push(struct cleanup_node_struct** head_ref, struct event_fd_data_st
 	(*head_ref)    = new_node; 
 }
 
+void do_cleanup(struct cleanup_node_struct **head_ref) {
+	struct cleanup_node_struct *current = (*head_ref);
+	struct cleanup_node_struct *previous = NULL, *gone = NULL;
+	
+	while (current != NULL) {
+		if(ssh_channel_is_closed(current->data->channel)) {
+			gone = current;
+			current = gone->next;
+			if (gone == (*head_ref)) {
+				(*head_ref) = current;
+			}
+			if (previous != NULL) {
+				previous->next = current;
+			}
+			previous = current;
+			free(gone->data->p_fd);
+			ssh_channel_free(gone->data->channel);
+			free(gone->data);
+			free(gone);
+			_ssh_log(SSH_LOG_FUNCTIONS, "=== do_cleanup", "Freed.");
+		}
+		else {
+			previous = current;
+			current = current->next;
+		}
+	}
+}
+
 static int auth_password(ssh_session session, const char *user,
 		const char *password, void *userdata){
 	(void)userdata;
@@ -188,9 +216,6 @@ static void my_channel_eof_function(ssh_session session, ssh_channel channel, vo
 	_ssh_log(SSH_LOG_PROTOCOL, "=== my_channel_eof_function", "Got EOF on channel %d:%d. Shuting down write on socket (fd = %d).", channel->local_channel, channel->remote_channel, *event_fd_data->p_fd);
 
 	close_socket(session, event_fd_data);
-	//if (-1 == shutdown(fd, SHUT_WR)) {
-	//	perror("Shutdown socket for writing");
-	//}
 }
 
 static void my_channel_exit_status_function(ssh_session session, ssh_channel channel, int exit_status, void *userdata) {
@@ -585,6 +610,7 @@ int main(int argc, char **argv){
 				ret = 1;
 				goto shutdown;
 			}
+			//do_cleanup(&cleanup_stack);
 		}
 	}
 	
