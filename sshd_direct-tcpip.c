@@ -58,6 +58,7 @@ static ssh_event mainloop=NULL;
 struct event_fd_data_struct {
 	int *p_fd;
 	ssh_channel channel;
+	int stacked;
 };
 
 struct cleanup_node_struct {
@@ -66,6 +67,8 @@ struct cleanup_node_struct {
 };
 
 static struct cleanup_node_struct *cleanup_stack;
+
+static void _close_socket( struct event_fd_data_struct event_fd_data);
 
 void cleanup_push(struct cleanup_node_struct** head_ref, struct event_fd_data_struct *new_data) { 
 	// Allocate memory for node 
@@ -95,13 +98,15 @@ void do_cleanup(struct cleanup_node_struct **head_ref) {
 				previous->next = current;
 			}
 			previous = current;
-			free(gone->data->p_fd);
+			_close_socket(*gone->data);
 			ssh_channel_free(gone->data->channel);
-			free(gone->data);
-			free(gone);
+			//free(gone->data->p_fd);
+			//free(gone->data);
+			SAFE_FREE(gone);
 			_ssh_log(SSH_LOG_FUNCTIONS, "=== do_cleanup", "Freed.");
 		}
 		else {
+			ssh_channel_close(current->data->channel);
 			previous = current;
 			current = current->next;
 		}
@@ -168,18 +173,22 @@ static ssh_channel new_session_channel(ssh_session session, void *userdata){
 	return NULL;
 }
 
-static void close_socket(ssh_session session, struct event_fd_data_struct *event_fd_data) {
-	if ((*event_fd_data->p_fd) > -1) {
+static void stack_socket_close(ssh_session session, struct event_fd_data_struct *event_fd_data) {
+	if (event_fd_data->stacked != 1) {
 		sockets_cnt--;
-		_ssh_log(SSH_LOG_FUNCTIONS, "=== close_socket", "Closing fd = %d sockets_cnt = %d", *event_fd_data->p_fd, sockets_cnt);
-		ssh_event_remove_session(mainloop, session);
-		ssh_event_remove_fd(mainloop, *event_fd_data->p_fd);
-		ssh_event_add_session(mainloop, session);
-		close(*event_fd_data->p_fd);
-		(*event_fd_data->p_fd) = -1;
+		_ssh_log(SSH_LOG_FUNCTIONS, "=== stack_socket_close", "Closing fd = %d sockets_cnt = %d", *event_fd_data->p_fd, sockets_cnt);
+		event_fd_data->stacked = 1;
 		cleanup_push(&cleanup_stack, event_fd_data);
-
 	}
+}
+
+static void _close_socket( struct event_fd_data_struct event_fd_data) {
+	_ssh_log(SSH_LOG_FUNCTIONS, "=== close_socket", "Closing fd = %d sockets_cnt = %d", *event_fd_data.p_fd, sockets_cnt);
+	ssh_session session = ssh_channel_get_session(event_fd_data.channel);
+	//ssh_event_remove_session(mainloop, session);
+	ssh_event_remove_fd(mainloop, *event_fd_data.p_fd);
+	//ssh_event_add_session(mainloop, session);
+	close(*event_fd_data.p_fd);
 }
 
 static int service_request(ssh_session session, const char *service, void *userdata){
@@ -202,11 +211,7 @@ static void my_channel_close_function(ssh_session session, ssh_channel channel, 
 	struct event_fd_data_struct *event_fd_data = (struct event_fd_data_struct *)userdata;
 	_ssh_log(SSH_LOG_PROTOCOL, "=== my_channel_close_function", "Channel %d:%d closed by remote. State=%d", channel->local_channel, channel->remote_channel, channel->state);
 	
-	close_socket(session, event_fd_data);
-
-	if (ssh_channel_is_open(channel)) {
-		ssh_channel_close(channel);
-	}
+	stack_socket_close(session, event_fd_data);
 }
 
 static void my_channel_eof_function(ssh_session session, ssh_channel channel, void *userdata) {
@@ -215,7 +220,7 @@ static void my_channel_eof_function(ssh_session session, ssh_channel channel, vo
 	struct event_fd_data_struct *event_fd_data = (struct event_fd_data_struct *)userdata;
 	_ssh_log(SSH_LOG_PROTOCOL, "=== my_channel_eof_function", "Got EOF on channel %d:%d. Shuting down write on socket (fd = %d).", channel->local_channel, channel->remote_channel, *event_fd_data->p_fd);
 
-	close_socket(session, event_fd_data);
+	stack_socket_close(session, event_fd_data);
 }
 
 static void my_channel_exit_status_function(ssh_session session, ssh_channel channel, int exit_status, void *userdata) {
@@ -235,7 +240,7 @@ static int my_channel_data_function(ssh_session session, ssh_channel channel, vo
 	}
 	if (i < 0) {
 		_ssh_log(SSH_LOG_WARNING, "=== my_channel_data_function", "Writing to tcp socket %s", strerror(errno));
-		close_socket(session, event_fd_data);
+		stack_socket_close(session, event_fd_data);
 		ssh_channel_send_eof(channel);
 	}
 	else {
@@ -261,7 +266,7 @@ static int cb_readsock(socket_t fd, int revents, void *userdata) {
 
 	if(ssh_channel_is_closed(channel)) {
 		_ssh_log(SSH_LOG_FUNCTIONS, "=== cb_readsock", "channel is closed!");
-		close_socket(session, event_fd_data);
+		stack_socket_close(session, event_fd_data);
 		//shutdown(fd, SHUT_WR);
 		return 0;
 	}
@@ -407,6 +412,7 @@ static int message_callback(ssh_session session, ssh_message message, void *user
 
 				event_fd_data->channel = channel;
 				event_fd_data->p_fd = pFd;
+				event_fd_data->stacked = 0;
 
 				cb_chan->userdata = event_fd_data;
 				cb_chan->channel_eof_function = my_channel_eof_function;
@@ -610,7 +616,7 @@ int main(int argc, char **argv){
 				ret = 1;
 				goto shutdown;
 			}
-			//do_cleanup(&cleanup_stack);
+			do_cleanup(&cleanup_stack);
 		}
 	}
 	
