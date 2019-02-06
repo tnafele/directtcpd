@@ -25,9 +25,7 @@ clients must be made or how a client should react.
 #include <libssh/libssh.h>
 #include <libssh/server.h>
 #include <libssh/callbacks.h>
-//#include <libssh/messages.h>
 #include <libssh/channels.h>
-//#include <libssh/poll.h>
 
 #ifdef HAVE_ARGP_H
 #include <argp.h>
@@ -48,13 +46,6 @@ clients must be made or how a client should react.
 #define USER "user"
 #define PASSWORD "pwd"
 
-static int authenticated = 0;
-static int tries = 0;
-static int error = 0;
-static int sockets_cnt = 0;
-//static ssh_channel chan=NULL;
-static ssh_event mainloop = NULL;
-
 struct event_fd_data_struct {
 	int *p_fd;
 	ssh_channel channel;
@@ -67,11 +58,16 @@ struct cleanup_node_struct {
 	struct cleanup_node_struct *next;
 };
 
+static int authenticated = 0;
+static int tries = 0;
+static int error = 0;
+static int sockets_cnt = 0;
+static ssh_event mainloop = NULL;
 static struct cleanup_node_struct *cleanup_stack = NULL;
 
 static void _close_socket(struct event_fd_data_struct event_fd_data);
 
-void cleanup_push(struct cleanup_node_struct** head_ref, struct event_fd_data_struct *new_data) { 
+static void cleanup_push(struct cleanup_node_struct** head_ref, struct event_fd_data_struct *new_data) { 
 	// Allocate memory for node 
 	struct cleanup_node_struct *new_node = malloc(sizeof *new_node);
 	//fprintf(stderr, "New Node %p\n", new_node);
@@ -86,7 +82,7 @@ void cleanup_push(struct cleanup_node_struct** head_ref, struct event_fd_data_st
 	(*head_ref) = new_node;
 }
 
-void do_cleanup(struct cleanup_node_struct **head_ref) {
+static void do_cleanup(struct cleanup_node_struct **head_ref) {
 	struct cleanup_node_struct *current = (*head_ref);
 	struct cleanup_node_struct *previous = NULL, *gone = NULL;
 	int cnt = 0;
@@ -233,27 +229,27 @@ static void global_request(ssh_session session, ssh_message message, void *userd
 }
 
 static void my_channel_close_function(ssh_session session, ssh_channel channel, void *userdata) {
+	struct event_fd_data_struct *event_fd_data = (struct event_fd_data_struct *)userdata;
 	(void)session;
 
-	struct event_fd_data_struct *event_fd_data = (struct event_fd_data_struct *)userdata;
 	_ssh_log(SSH_LOG_PROTOCOL, "=== my_channel_close_function", "Channel %d:%d closed by remote. State=%d", channel->local_channel, channel->remote_channel, channel->state);
 
 	stack_socket_close(session, event_fd_data);
 }
 
 static void my_channel_eof_function(ssh_session session, ssh_channel channel, void *userdata) {
-	(void)session;
-	//(void)userdata;
 	struct event_fd_data_struct *event_fd_data = (struct event_fd_data_struct *)userdata;
+	(void)session;
+
 	_ssh_log(SSH_LOG_PROTOCOL, "=== my_channel_eof_function", "Got EOF on channel %d:%d. Shuting down write on socket (fd = %d).", channel->local_channel, channel->remote_channel, *event_fd_data->p_fd);
 
 	stack_socket_close(session, event_fd_data);
 }
 
 static void my_channel_exit_status_function(ssh_session session, ssh_channel channel, int exit_status, void *userdata) {
-	(void)session;
-	//(void)userdata;
 	struct event_fd_data_struct *event_fd_data = (struct event_fd_data_struct *)userdata;
+	(void)session;
+
 	_ssh_log(SSH_LOG_PROTOCOL, "=== my_channel_exit_status_function", "Got exit status %d on channel %d:%d fd = %d.", exit_status, channel->local_channel, channel->remote_channel, *event_fd_data->p_fd);
 }
 
@@ -279,7 +275,7 @@ static int my_channel_data_function(ssh_session session, ssh_channel channel, vo
 	return i;
 }
 
-static int cb_readsock(socket_t fd, int revents, void *userdata) {
+static int my_fd_data_function(socket_t fd, int revents, void *userdata) {
 	struct event_fd_data_struct *event_fd_data = (struct event_fd_data_struct *)userdata;
 	ssh_channel channel = event_fd_data->channel;
 	ssh_session session;
@@ -288,14 +284,14 @@ static int cb_readsock(socket_t fd, int revents, void *userdata) {
 	int	blocking;
 
 	if (channel == NULL) {
-		_ssh_log(SSH_LOG_FUNCTIONS, "=== cb_readsock", "channel == NULL!");
+		_ssh_log(SSH_LOG_FUNCTIONS, "=== my_fd_data_function", "channel == NULL!");
 		return 0;
 	}
 
 	session = ssh_channel_get_session(channel);
 
 	if (ssh_channel_is_closed(channel)) {
-		_ssh_log(SSH_LOG_FUNCTIONS, "=== cb_readsock", "channel is closed!");
+		_ssh_log(SSH_LOG_FUNCTIONS, "=== my_fd_data_function", "channel is closed!");
 		stack_socket_close(session, event_fd_data);
 		//shutdown(fd, SHUT_WR);
 		return 0;
@@ -303,19 +299,19 @@ static int cb_readsock(socket_t fd, int revents, void *userdata) {
 
 	if (!(revents & POLLIN)) {
 		if (revents & POLLPRI) {
-			_ssh_log(SSH_LOG_PROTOCOL, "=== cb_readsock", "poll revents & POLLPRI");
+			_ssh_log(SSH_LOG_PROTOCOL, "=== my_fd_data_function", "poll revents & POLLPRI");
 		}
 		if (revents & POLLOUT) {
-			_ssh_log(SSH_LOG_PROTOCOL, "=== cb_readsock", "poll revents & POLLOUT");
+			_ssh_log(SSH_LOG_PROTOCOL, "=== my_fd_data_function", "poll revents & POLLOUT");
 		}
 		if (revents & POLLHUP) {
-			_ssh_log(SSH_LOG_PROTOCOL, "=== cb_readsock", "poll revents & POLLHUP");
+			_ssh_log(SSH_LOG_PROTOCOL, "=== my_fd_data_function", "poll revents & POLLHUP");
 		}
 		if (revents & POLLNVAL) {
-			_ssh_log(SSH_LOG_PROTOCOL, "=== cb_readsock", "poll revents & POLLNVAL");
+			_ssh_log(SSH_LOG_PROTOCOL, "=== my_fd_data_function", "poll revents & POLLNVAL");
 		}
 		if (revents & POLLERR) {
-			_ssh_log(SSH_LOG_PROTOCOL, "=== cb_readsock", "poll revents & POLLERR");
+			_ssh_log(SSH_LOG_PROTOCOL, "=== my_fd_data_function", "poll revents & POLLERR");
 		}
 		//if (revents & POLLRDHUP) {
 		//    printf(" POLLRDHUP");
@@ -326,7 +322,7 @@ static int cb_readsock(socket_t fd, int revents, void *userdata) {
 	blocking = ssh_is_blocking(session);
 	ssh_set_blocking(session, 0);
 
-	_ssh_log(SSH_LOG_FUNCTIONS, "=== cb_readsock", "Trying to read from tcp socket fd = %d... (Channel %d:%d state=%d)", 
+	_ssh_log(SSH_LOG_FUNCTIONS, "=== my_fd_data_function", "Trying to read from tcp socket fd = %d... (Channel %d:%d state=%d)", 
 						*event_fd_data->p_fd, channel->local_channel, channel->remote_channel, channel->state);
 #ifdef _WIN32
 	struct sockaddr from;
@@ -336,7 +332,7 @@ static int cb_readsock(socket_t fd, int revents, void *userdata) {
 	len = recv(*event_fd_data->p_fd, buf, sizeof(buf), 0);
 #endif // _WIN32
 	if (len < 0) {
-		_ssh_log(SSH_LOG_WARNING, "=== cb_readsock", "Reading from tcp socket: %s", strerror(errno));
+		_ssh_log(SSH_LOG_WARNING, "=== my_fd_data_function", "Reading from tcp socket: %s", strerror(errno));
 
 		ssh_channel_send_eof(channel);
 	}
@@ -346,20 +342,20 @@ static int cb_readsock(socket_t fd, int revents, void *userdata) {
 			do {
 				i = ssh_channel_write(channel, buf, len);
 				if (i < 0) {
-					_ssh_log(SSH_LOG_WARNING, "=== cb_readsock", "Error writing on the direct-tcpip channel: %d", i);
+					_ssh_log(SSH_LOG_WARNING, "=== my_fd_data_function", "Error writing on the direct-tcpip channel: %d", i);
 					len = wr;
 					break;
 				}
 				wr += i;
-				_ssh_log(SSH_LOG_FUNCTIONS, "=== cb_readsock", "channel_write (%d from %d)", wr, len);
+				_ssh_log(SSH_LOG_FUNCTIONS, "=== my_fd_data_function", "channel_write (%d from %d)", wr, len);
 			} while (i > 0 && wr < len);
 		}
 		else {
-			_ssh_log(SSH_LOG_WARNING, "=== cb_readsock", "Can't write on closed channel!");
+			_ssh_log(SSH_LOG_WARNING, "=== my_fd_data_function", "Can't write on closed channel!");
 		}
 	}
 	else {
-		_ssh_log(SSH_LOG_PROTOCOL, "=== cb_readsock", "The destination host has disconnected!");
+		_ssh_log(SSH_LOG_PROTOCOL, "=== my_fd_data_function", "The destination host has disconnected!");
 
 		ssh_channel_close(channel);
 #ifdef _WIN32
@@ -373,7 +369,7 @@ static int cb_readsock(socket_t fd, int revents, void *userdata) {
 	return len;
 }
 
-int open_tcp_socket(ssh_message msg) {
+static int open_tcp_socket(ssh_message msg) {
 	struct sockaddr_in sin;
 	int forwardsock = -1;
 	struct hostent *host;
@@ -414,15 +410,14 @@ int open_tcp_socket(ssh_message msg) {
 
 
 static int message_callback(ssh_session session, ssh_message message, void *userdata) {
-	(void)session;
-	(void)message;
-	(void)userdata;
 	ssh_channel channel;
 	int *pFd;
 	struct ssh_channel_callbacks_struct *cb_chan;
 	struct event_fd_data_struct  *event_fd_data;
+	(void)session;
+	(void)message;
+	(void)userdata;
 
-	//int dest_port;
 	_ssh_log(SSH_LOG_PACKET, "=== message_callback", "Message type: %d", ssh_message_type(message));
 	_ssh_log(SSH_LOG_PACKET, "=== message_callback", "Message Subtype: %d", ssh_message_subtype(message));
 	if (ssh_message_type(message) == SSH_REQUEST_CHANNEL_OPEN) {
@@ -463,7 +458,7 @@ static int message_callback(ssh_session session, ssh_message message, void *user
 				ssh_callbacks_init(cb_chan);
 				ssh_set_channel_callbacks(channel, cb_chan);
 
-				ssh_event_add_fd(mainloop, (socket_t)*pFd, POLLIN, cb_readsock, event_fd_data);
+				ssh_event_add_fd(mainloop, (socket_t)*pFd, POLLIN, my_fd_data_function, event_fd_data);
 
 				return 0;
 			}
