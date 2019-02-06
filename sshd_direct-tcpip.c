@@ -375,11 +375,23 @@ static int open_tcp_socket(ssh_message msg) {
 	struct hostent *host;
 	const char *dest_hostname;
 	int dest_port;
+    struct timeval timeout;      
 
 	forwardsock = socket(AF_INET, SOCK_STREAM, 0);
 	if (forwardsock < 0) {
 		_ssh_log(SSH_LOG_WARNING, "=== open_tcp_socket", "ERROR opening socket: %s", strerror(errno));
 		return -1;
+	}
+
+    timeout.tv_sec = 10;
+    timeout.tv_usec = 0;
+
+    if (setsockopt (forwardsock, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        perror("setsockopt failed\n");
+	}
+
+    if (setsockopt (forwardsock, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        perror("setsockopt failed\n");
 	}
 
 	dest_hostname = ssh_message_channel_request_open_destination(msg);
@@ -411,39 +423,45 @@ static int open_tcp_socket(ssh_message msg) {
 
 static int message_callback(ssh_session session, ssh_message message, void *userdata) {
 	ssh_channel channel;
-	int *pFd;
+	int socket_fd, *pFd;
 	struct ssh_channel_callbacks_struct *cb_chan;
 	struct event_fd_data_struct  *event_fd_data;
 	(void)session;
 	(void)message;
 	(void)userdata;
 
-	_ssh_log(SSH_LOG_PACKET, "=== message_callback", "Message type: %d", ssh_message_type(message));
-	_ssh_log(SSH_LOG_PACKET, "=== message_callback", "Message Subtype: %d", ssh_message_subtype(message));
+	_ssh_log(SSH_LOG_PACKET, "=== message_callback", "Message type: %d subtype: %d", ssh_message_type(message), ssh_message_subtype(message));
 	if (ssh_message_type(message) == SSH_REQUEST_CHANNEL_OPEN) {
 		//printf("channel_request_open.sender: %d\n", message->channel_request_open.sender);
-		_ssh_log(SSH_LOG_PROTOCOL, "=== message_callback", "channel_request_open");
+		_ssh_log(SSH_LOG_PROTOCOL, "=== message_callback", "channel_request_open From: %s:%d Tp %s:%d",
+								ssh_message_channel_request_open_originator(message), 
+								ssh_message_channel_request_open_originator_port(message),
+								ssh_message_channel_request_open_destination(message),
+								ssh_message_channel_request_open_destination_port(message));
 
 		if (ssh_message_subtype(message) == SSH_CHANNEL_DIRECT_TCPIP) {
-			channel = ssh_message_channel_request_open_reply_accept(message);
-
 			//	return 0;
-			if (channel == NULL) {
-				_ssh_log(SSH_LOG_WARNING, "=== message_callback", "Accepting direct-tcpip channel failed!");
+			socket_fd = open_tcp_socket(message);
+			if (-1 == socket_fd) {
+				//ssh_channel_write_stderr(channel, "Opening remote connection failed", 32);
+				//ssh_channel_free(channel);
 				return 1;
 			}
 			else {
-				_ssh_log(SSH_LOG_PROTOCOL, "=== message_callback", "Connected to channel!");
+				//fprintf(stderr, "#%d New %p\n", sockets_cnt, (void *)event_fd_data);
+				channel = ssh_message_channel_request_open_reply_accept(message);
+				if (channel == NULL) {
+					_ssh_log(SSH_LOG_WARNING, "=== message_callback", "Accepting direct-tcpip channel failed!");
+					close(socket_fd);
+					return 1;
+				}
+				_ssh_log(SSH_LOG_PROTOCOL, "=== message_callback", "Channel accepted.");
+
 				pFd = malloc(sizeof *pFd);
 				cb_chan = malloc(sizeof *cb_chan);
 				event_fd_data = malloc(sizeof *event_fd_data);
-				//fprintf(stderr, "#%d New %p\n", sockets_cnt, (void *)event_fd_data);
 
-				*pFd = open_tcp_socket(message);
-				if (-1 == *pFd) {
-					return 1;
-				}
-
+				(*pFd) = socket_fd;
 				event_fd_data->channel = channel;
 				event_fd_data->p_fd = pFd;
 				event_fd_data->stacked = 0;
